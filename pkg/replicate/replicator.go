@@ -73,6 +73,7 @@ func RunReplicate(
 	fromObjStoreConfig *extflag.PathOrContent,
 	toObjStoreConfig *extflag.PathOrContent,
 	singleRun bool,
+	waitInterval time.Duration,
 	minTime, maxTime *thanosmodel.TimeOrDurationValue,
 	blockIDs []ulid.ULID,
 	ignoreMarkedForDeletion bool,
@@ -204,7 +205,7 @@ func RunReplicate(
 			return replicateFn()
 		}
 
-		return runutil.Repeat(time.Minute, ctx.Done(), func() error {
+		return runutil.Repeat(waitInterval, ctx.Done(), func() error {
 			start := time.Now()
 			if err := replicateFn(); err != nil {
 				level.Error(logger).Log("msg", "running replication failed", "err", err)

@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/json"
 	"math"
+	"math/rand"
 	"net/http"
 	"sort"
 	"strconv"
@@ -30,6 +31,7 @@ import (
 	"time"
 
 	"github.com/go-kit/log"
+	"github.com/go-kit/log/level"
 	"github.com/opentracing/opentracing-go"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
@@ -106,6 +108,7 @@ type QueryAPI struct {
 	enableTargetPartialResponse         bool
 	enableMetricMetadataPartialResponse bool
 	enableExemplarPartialResponse       bool
+	enableQueryLogging                  bool
 	disableCORS                         bool
 
 	replicaLabels  []string
@@ -145,6 +148,7 @@ func NewQueryAPI(
 	enableTargetPartialResponse bool,
 	enableMetricMetadataPartialResponse bool,
 	enableExemplarPartialResponse bool,
+	enableQueryLogging bool,
 	replicaLabels []string,
 	flagsMap map[string]string,
 	defaultRangeQueryStep time.Duration,
@@ -182,6 +186,7 @@ func NewQueryAPI(
 		enableTargetPartialResponse:            enableTargetPartialResponse,
 		enableMetricMetadataPartialResponse:    enableMetricMetadataPartialResponse,
 		enableExemplarPartialResponse:          enableExemplarPartialResponse,
+		enableQueryLogging:                     enableQueryLogging,
 		replicaLabels:                          replicaLabels,
 		endpointStatus:                         endpointStatus,
 		defaultRangeQueryStep:                  defaultRangeQueryStep,
@@ -201,6 +206,19 @@ func NewQueryAPI(
 			Buckets: prometheus.ExponentialBuckets(15*60, 2, 12),
 		}),
 	}
+}
+
+const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+func generateRandomString(length int) string {
+	seed := rand.NewSource(time.Now().UnixNano())
+	r := rand.New(seed)
+
+	result := make([]byte, length)
+	for i := range result {
+		result[i] = charset[r.Intn(len(charset))]
+	}
+	return string(result)
 }
 
 // Register the API's endpoints in the given router.
@@ -611,6 +629,27 @@ func (qapi *QueryAPI) query(r *http.Request) (interface{}, []error, *api.ApiErro
 		return nil, nil, &api.ApiError{Typ: api.ErrorBadData, Err: err}, func() {}
 	}
 
+	var requestID string
+	if qapi.enableQueryLogging {
+		// Log the incoming query.
+		requestID = generateRandomString(16)
+		level.Info(qapi.logger).Log(
+			"msg", "incoming query started",
+			"qryType", "instant",
+			"qryQuery", queryStr,
+			"qryRequestId", requestID,
+			"qryTime", ts.Format(time.RFC3339),
+			"qryMaxSourceResolution", maxSourceResolution,
+			"qryEngine", engineParam,
+			"qryTenant", tenant,
+			"qryReplicaLabels", replicaLabels,
+			"qryEnableDedup", enableDedup,
+			"qryEnablePartialResponse", enablePartialResponse,
+			"qryShardInfo", shardInfo,
+			"qryLookbackDelta", lookbackDelta,
+		)
+	}
+
 	var (
 		qry         promql.Query
 		seriesStats []storepb.SeriesStatsCounter
@@ -678,15 +717,40 @@ func (qapi *QueryAPI) query(r *http.Request) (interface{}, []error, *api.ApiErro
 
 	// Optional stats field in response if parameter "stats" is not empty.
 	var qs stats.QueryStats
-	if r.FormValue(Stats) != "" {
-		qs = stats.NewQueryStats(qry.Stats())
+	qs = stats.NewQueryStats(qry.Stats())
+
+	if qapi.enableQueryLogging {
+		level.Info(qapi.logger).Log(
+			"msg", "incoming query finished",
+			"qryType", "instant",
+			"qryQuery", queryStr,
+			"qryRequestId", requestID,
+			"qryTimingEvalTotalTime", qs.Builtin().Timings.EvalTotalTime,
+			"qryTimingExecQueueTime", qs.Builtin().Timings.ExecQueueTime,
+			"qryTimingExecTotalTime", qs.Builtin().Timings.ExecTotalTime,
+			"qryTimingInnerEvalTime", qs.Builtin().Timings.InnerEvalTime,
+			"qryTimingQueryPreparationTime", qs.Builtin().Timings.QueryPreparationTime,
+			"qryTimingResultSortTime", qs.Builtin().Timings.ResultSortTime,
+			"qrySamplesPeakSamples", qs.Builtin().Samples.PeakSamples,
+			"qrySamplesTotalQueryableSamples", qs.Builtin().Samples.TotalQueryableSamples,
+			"qrySamplesTotalQueryableSamplesPerStep", qs.Builtin().Samples.TotalQueryableSamplesPerStep,
+		)
 	}
-	return &queryData{
-		ResultType:    res.Value.Type(),
-		Result:        res.Value,
-		Stats:         qs,
-		QueryAnalysis: analysis,
-	}, res.Warnings.AsErrors(), nil, qry.Close
+	if r.FormValue(Stats) != "" {
+		return &queryData{
+			ResultType:    res.Value.Type(),
+			Result:        res.Value,
+			Stats:         qs,
+			QueryAnalysis: analysis,
+		}, res.Warnings.AsErrors(), nil, qry.Close
+	} else {
+		return &queryData{
+			ResultType:    res.Value.Type(),
+			Result:        res.Value,
+			Stats:         nil,
+			QueryAnalysis: analysis,
+		}, res.Warnings.AsErrors(), nil, qry.Close
+	}
 }
 
 func (qapi *QueryAPI) queryRangeExplain(r *http.Request) (interface{}, []error, *api.ApiError, func()) {
@@ -920,6 +984,27 @@ func (qapi *QueryAPI) queryRange(r *http.Request) (interface{}, []error, *api.Ap
 		return nil, nil, &api.ApiError{Typ: api.ErrorBadData, Err: err}, func() {}
 	}
 
+	// Generate a random request ID.
+	requestID := generateRandomString(16)
+	if qapi.enableQueryLogging {
+		level.Info(qapi.logger).Log(
+			"msg", "incoming range query started",
+			"qryType", "range",
+			"qryQuery", queryStr,
+			"qryRequestId", requestID,
+			"qryStart", start.Format(time.RFC3339),
+			"qryEnd", end.Format(time.RFC3339),
+			"qryStep", step.String(),
+			"qryMaxSourceResolution", maxSourceResolution,
+			"qryEngine", engineParam,
+			"qryTenant", tenant,
+			"qryReplicaLabels", replicaLabels,
+			"qryEnableDedup", enableDedup,
+			"qryEnablePartialResponse", enablePartialResponse,
+			"qryShardInfo", shardInfo,
+			"qryLookbackDelta", lookbackDelta,
+		)
+	}
 	var (
 		qry         promql.Query
 		seriesStats []storepb.SeriesStatsCounter
@@ -984,15 +1069,40 @@ func (qapi *QueryAPI) queryRange(r *http.Request) (interface{}, []error, *api.Ap
 
 	// Optional stats field in response if parameter "stats" is not empty.
 	var qs stats.QueryStats
-	if r.FormValue(Stats) != "" {
-		qs = stats.NewQueryStats(qry.Stats())
+	qs = stats.NewQueryStats(qry.Stats())
+
+	if qapi.enableQueryLogging {
+		level.Info(qapi.logger).Log(
+			"msg", "incoming range query finished",
+			"qryType", "range",
+			"qryQuery", queryStr,
+			"qryRequestId", requestID,
+			"qryTimingEvalTotalTime", qs.Builtin().Timings.EvalTotalTime,
+			"qryTimingExecQueueTime", qs.Builtin().Timings.ExecQueueTime,
+			"qryTimingExecTotalTime", qs.Builtin().Timings.ExecTotalTime,
+			"qryTimingInnerEvalTime", qs.Builtin().Timings.InnerEvalTime,
+			"qryTimingQueryPreparationTime", qs.Builtin().Timings.QueryPreparationTime,
+			"qryTimingResultSortTime", qs.Builtin().Timings.ResultSortTime,
+			"qrySamplesPeakSamples", qs.Builtin().Samples.PeakSamples,
+			"qrySamplesTotalQueryableSamples", qs.Builtin().Samples.TotalQueryableSamples,
+			"qrySamplesTotalQueryableSamplesPerStep", qs.Builtin().Samples.TotalQueryableSamplesPerStep,
+		)
 	}
-	return &queryData{
-		ResultType:    res.Value.Type(),
-		Result:        res.Value,
-		Stats:         qs,
-		QueryAnalysis: analysis,
-	}, res.Warnings.AsErrors(), nil, qry.Close
+	if r.FormValue(Stats) != "" {
+		return &queryData{
+			ResultType:    res.Value.Type(),
+			Result:        res.Value,
+			Stats:         qs,
+			QueryAnalysis: analysis,
+		}, res.Warnings.AsErrors(), nil, qry.Close
+	} else {
+		return &queryData{
+			ResultType:    res.Value.Type(),
+			Result:        res.Value,
+			Stats:         nil,
+			QueryAnalysis: analysis,
+		}, res.Warnings.AsErrors(), nil, qry.Close
+	}
 }
 
 func (qapi *QueryAPI) labelValues(r *http.Request) (interface{}, []error, *api.ApiError, func()) {

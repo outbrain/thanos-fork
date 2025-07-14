@@ -126,12 +126,13 @@ type bucketWebConfig struct {
 }
 
 type bucketReplicateConfig struct {
-	resolutions []time.Duration
-	compactMin  int
-	compactMax  int
-	compactions []int
-	matcherStrs string
-	singleRun   bool
+	resolutions  []time.Duration
+	compactMin   int
+	compactMax   int
+	compactions  []int
+	matcherStrs  string
+	singleRun    bool
+	waitInterval time.Duration
 }
 
 type bucketDownsampleConfig struct {
@@ -229,6 +230,8 @@ func (tbc *bucketReplicateConfig) registerBucketReplicateFlag(cmd extkingpin.Fla
 	cmd.Flag("matcher", "blocks whose external labels match this matcher will be replicated. All Prometheus matchers are supported, including =, !=, =~ and !~.").StringVar(&tbc.matcherStrs)
 
 	cmd.Flag("single-run", "Run replication only one time, then exit.").Default("false").BoolVar(&tbc.singleRun)
+
+	cmd.Flag("wait-interval", "Wait interval between consecutive replicate runs. Only works when --single-run flag is not specified.").Default("5m").DurationVar(&tbc.waitInterval)
 
 	return tbc
 }
@@ -783,6 +786,7 @@ func registerBucketReplicate(app extkingpin.AppClause, objStoreConfig *extflag.P
 			objStoreConfig,
 			toObjStoreConfig,
 			tbc.singleRun,
+			tbc.waitInterval,
 			minTime,
 			maxTime,
 			blockIDs,

@@ -207,7 +207,7 @@ endif
 docker-multi-stage: ## Builds 'thanos' docker image using multi-stage.
 docker-multi-stage:
 	@echo ">> building docker image 'thanos' with Dockerfile.multi-stage"
-	@docker build -f Dockerfile.multi-stage -t "thanos" --build-arg BASE_DOCKER_SHA=$(BASE_DOCKER_SHA) .
+	@docker build -f Dockerfile.multi-stage -t "thanos" --platform linux/amd64 --build-arg BASE_DOCKER_SHA=$(BASE_DOCKER_SHA) .
 
 # docker-build builds docker images with multiple architectures.
 .PHONY: docker-build $(BUILD_DOCKER_ARCHS)
